@@ -5,11 +5,11 @@ from .blocks import PSBlock, SegAtt
 
 class PSFormer(nn.Module):
     """
-    Minimal PSformer that:
-      - takes input (batch, C, N)
-      - passes through n_layers of SegAtt (sharing a PSBlock instance)
-      - flattens and maps to output dimension M * F
-    It's purposely simple to match the needs of unit tests (overfitting toy data).
+    PSFormer with decoder/inverse transform:
+      - input: (batch, C, N)
+      - encoder: repeated SegAtt layers (sharing PSBlock)
+      - inverse patch: (batch, C, N) -> (batch, M, L)
+      - linear mapping W_F: L -> F (applied per variable) to produce (batch, M, F)
     """
     def __init__(self, M: int, L: int, P: int, horizon: int = 1, n_layers: int = 2):
         super().__init__()
@@ -24,17 +24,27 @@ class PSFormer(nn.Module):
 
         # shared PSBlock across layers
         self.ps_block = PSBlock(self.N)
-        # build layers using the same ps_block (shared parameters)
         self.layers = nn.ModuleList([SegAtt(self.ps_block, d_k=self.N) for _ in range(n_layers)])
 
-        # after encoder -> flatten and a simple MLP to map to M*F
-        flattened_dim = self.C * self.N
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(flattened_dim, max(16, flattened_dim // 8)),
-            nn.ReLU(),
-            nn.Linear(max(16, flattened_dim // 8), M * self.F)
-        )
+        # Decoder linear mapping W_F: map L -> F for each channel.
+        # Implemented as a single Linear applied to flattened (batch*M, L)
+        self.W_F = nn.Linear(self.L, self.F)
+
+    def _segments_to_series(self, seg_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Convert seg_tensor shape (batch, C, N) -> (batch, M, L)
+        where C = M * P and L = N * P
+        """
+        if seg_tensor.dim() != 3:
+            raise ValueError("_segments_to_series expects shape (batch, C, N)")
+        batch = seg_tensor.size(0)
+        # seg_tensor: (batch, C, N) with C = M*P
+        # reshape to (batch, M, P, N)
+        # ensure contiguous before view
+        x = seg_tensor.contiguous().view(batch, self.M, self.P, self.N)
+        # permute to (batch, M, N, P) then reshape to (batch, M, L)
+        x = x.permute(0, 1, 3, 2).contiguous().view(batch, self.M, self.L)
+        return x
 
     def forward(self, x):
         """
@@ -45,8 +55,13 @@ class PSFormer(nn.Module):
             raise ValueError("Input must be (batch, C, N)")
         out = x
         for layer in self.layers:
-            out = layer(out)
-        # head expects (batch, C, N)
-        y = self.head(out)  # (batch, M*F)
-        y = y.view(x.size(0), self.M, self.F)
-        return y
+            out = layer(out)  # (batch, C, N)
+        # inverse to series shape
+        series = self._segments_to_series(out)  # (batch, M, L)
+        # map time dimension L -> F using linear W_F applied per channel
+        b, m, l = series.shape
+        # flatten channels into batch dimension for a single linear transform
+        series_flat = series.view(b * m, l)  # (b*M, L)
+        pred_flat = self.W_F(series_flat)     # (b*M, F)
+        pred = pred_flat.view(b, m, self.F)   # (b, M, F)
+        return pred

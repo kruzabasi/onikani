@@ -11,6 +11,20 @@ def seed_everything(seed=1):
     random.seed(seed)
     torch.manual_seed(seed)
 
+def test_model_forward_shape():
+    seed_everything(0)
+    M = 2
+    L = 16
+    P = 4
+    F = 2
+    batch = 4
+    C = M * P
+    N = L // P
+    x = torch.randn(batch, C, N)
+    model = PSFormer(M=M, L=L, P=P, horizon=F, n_layers=1)
+    out = model(x)
+    assert out.shape == (batch, M, F)
+
 def test_model_can_overfit_small_batch():
     seed_everything(42)
     # create tiny synthetic dataset where model can memorize
@@ -19,17 +33,14 @@ def test_model_can_overfit_small_batch():
     L = 16
     P = 4
     F = 1
-    # simple signal: two channels with different sinusoids + small noise
     t = np.arange(T)
     X = np.vstack([
         (np.sin(0.1 * t) + 0.01 * np.random.randn(T)),
         (np.cos(0.08 * t) + 0.01 * np.random.randn(T))
     ]).astype(float)
     ds = SlidingWindowDataset(X, input_length=L, patch_size=P, horizon=F)
-    # tiny model
     model = PSFormer(M=M, L=L, P=P, horizon=F, n_layers=2)
     trainer = Trainer(model, device="cpu")
-    # train for small epochs; should reduce loss significantly
-    hist = trainer.fit(ds, epochs=60, batch_size=8, lr=1e-3, verbose=False)
+    hist = trainer.fit(ds, epochs=80, batch_size=8, lr=1e-3, verbose=False)
     final_loss = hist["loss"][-1]
     assert final_loss < 0.02, f"Model did not overfit enough, final_loss={final_loss}"
