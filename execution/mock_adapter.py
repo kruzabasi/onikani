@@ -9,18 +9,17 @@ from execution.adapter import ExecutionAdapter, Order, OrderResult, Position
 
 class MockExecutionAdapter(ExecutionAdapter):
     """
-    In-memory mock adapter for testing/backtesting.
-    - Fills orders immediately at `order.price` if provided, otherwise at the adapter's `market_price`.
-    - Tracks positions in memory.
-    - Simple P&L model: profit = (current_price - open_price) * volume for buys,
-      profit = (open_price - current_price) * volume for sells.
+    In-memory mock adapter for testing/backtesting with symbol-specific contract sizes/pip handling.
+    - symbol_specs: optional dict like {"EURUSD": {"contract_size": 100000, "pip": 0.0001}}
+    - profit = (price - open_price) * contract_size * volume  for buy
     """
 
-    def __init__(self, initial_market_price: float = 1.0, initial_balance: float = 10000.0):
+    def __init__(self, initial_market_price: float = 1.0, initial_balance: float = 10000.0, symbol_specs: Optional[Dict[str, Dict]] = None):
         self.positions: Dict[str, Position] = {}
         self.market_price = float(initial_market_price)
         self.balance = float(initial_balance)
         self._last_closed_profits: Dict[str, float] = {}
+        self.symbol_specs = symbol_specs or {}
 
     def send_order(self, order: Order) -> OrderResult:
         if order.side not in ("buy", "sell"):
@@ -68,11 +67,16 @@ class MockExecutionAdapter(ExecutionAdapter):
         self.market_price = float(new_price)
 
     def _profit_for_position(self, pos: Position, price: float) -> float:
+        # symbol-based contract size
+        spec = self.symbol_specs.get(pos.symbol, {})
+        contract_size = float(spec.get("contract_size", 1.0))
+        # compute price difference
         if pos.side == "buy":
-            return (price - pos.open_price) * pos.volume
+            diff = price - pos.open_price
         else:
-            # sell: profit when price goes down
-            return (pos.open_price - price) * pos.volume
+            diff = pos.open_price - price
+        profit = diff * contract_size * pos.volume
+        return profit
 
     def close_all_positions(self, price: Optional[float] = None) -> Dict[str, OrderResult]:
         results = {}
